@@ -1,60 +1,83 @@
-from flask import Flask
+from flask import Flask, request, jsonify
 from flask_restx import Api, Resource, fields
-import tensorflow_hub as hub
-from tensorflow.keras.models import load_model
 import numpy as np
+import tensorflow_hub as hub
+import tensorflow as tf
+import os
+from tensorflow.keras.models import load_model
 
-# Cargar el modelo de géneros
-try:
-    model = load_model('modelo_generos.keras')
-    print("✅ Modelo cargado correctamente")
-except:
-    print("⚠️ Modelo no cargado.")
-    model = None
+# Inicializar Flask y Flask-RESTx
+app = Flask(__name__)
+api = Api(app, version='1.0', title='API de Predicción de Géneros de Películas',
+          description='Predice géneros a partir de la sinopsis')
 
-# Cargar el modelo de Universal Sentence Encoder
+ns = api.namespace('predict', description='Operaciones de predicción')
+
+# Modelo de entrada: solo el texto de la sinopsis
+input_model = api.model('Input', {
+    'plot': fields.String(required=True, description='Sinopsis de la película')
+})
+
+# Intenta cargar el modelo USE local
 try:
-    embed = hub.load("https://tfhub.dev/google/universal-sentence-encoder/4")
-    print("✅ USE cargado correctamente")
-except:
-    print("⚠️ Modelo USE no cargado.")
+    USE_LOCAL_PATH = os.path.join(os.path.dirname(__file__), "use_model")
+    embed = hub.load(USE_LOCAL_PATH)
+    print("✅ Modelo USE cargado correctamente")
+except Exception as e:
+    print("⚠️ Modelo USE no cargado:", e)
     embed = None
 
-# Inicializar la app
-app = Flask(__name__)
-api = Api(app, version='1.0', title='Predicción de Géneros de Películas',
-          description='API que predice la probabilidad de géneros basada en el plot (descripción)')
+# Cargar modelo de predicción
+try:
+    model_path = os.path.join(os.path.dirname(__file__), "modelo_generos.keras")
+    clf = load_model(model_path)
+    print("✅ Modelo de géneros cargado correctamente")
+except Exception as e:
+    print("⚠️ Modelo de géneros no cargado:", e)
+    clf = None
 
-ns = api.namespace('predict', description='Predicción de géneros')
-
-# Parámetros esperados
-parser = ns.parser()
-parser.add_argument('plot', type=str, required=True, help='Descripción de la película', location='args')
-
-# Salida esperada
-resource_fields = api.model('Prediction', {
-    'predicciones': fields.List(fields.Float),
-})
+# Etiquetas de géneros esperadas
+GENRES = ['Action', 'Adventure', 'Animation', 'Biography', 'Comedy', 'Crime', 'Documentary', 'Drama',
+          'Family', 'Fantasy', 'Film-Noir', 'History', 'Horror', 'Music', 'Musical', 'Mystery', 'News',
+          'Romance', 'Sci-Fi', 'Short', 'Sport', 'Thriller', 'War', 'Western']
 
 @ns.route('/')
 class GenrePredictor(Resource):
+    @ns.expect(input_model)
+    def post(self):
+        if not embed or not clf:
+            return {"error": "Modelos no cargados"}, 500
 
-    @ns.doc(parser=parser)
-    @ns.marshal_with(resource_fields)
+        try:
+            plot = api.payload['plot']
+            print(f"📥 Sinopsis recibida: {plot}")
+            embedding = embed([plot]).numpy()
+            prediction = clf.predict(embedding)[0]
+            resultado = {genre: float(score) for genre, score in zip(GENRES, prediction)}
+            return {"predicted_genres": resultado}
+        except Exception as e:
+            print("❌ Error durante la predicción:", e)
+            return {"error": str(e)}, 500
+
+    @ns.doc(params={'plot': 'Sinopsis de la película'})
     def get(self):
-        args = parser.parse_args()
-        plot = args['plot']
+        if not embed or not clf:
+            return {"error": "Modelos no cargados"}, 500
 
-        if model is None or embed is None:
-            return {'predicciones': [-1.0] * 24}, 200
+        try:
+            plot = request.args.get("plot")
+            if not plot:
+                return {"error": "Falta el parámetro 'plot'"}, 400
 
-        # Generar embedding de la descripción
-        embedding = embed([plot]).numpy()
-        
-        # Hacer predicción
-        pred = model.predict(embedding)[0].tolist()
-        
-        return {'predicciones': pred}, 200
+            print(f"📥 Sinopsis recibida (GET): {plot}")
+            embedding = embed([plot]).numpy()
+            prediction = clf.predict(embedding)[0]
+            resultado = {genre: float(score) for genre, score in zip(GENRES, prediction)}
+            return {"predicted_genres": resultado}
+        except Exception as e:
+            print("❌ Error durante la predicción (GET):", e)
+            return {"error": str(e)}, 500
 
+# Ejecutar la aplicación
 if __name__ == '__main__':
-    app.run(debug=True, use_reloader=False, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5000)
